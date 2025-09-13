@@ -1,0 +1,350 @@
+import React, { useState, useEffect, useMemo } from "react";
+// App.jsx - Single-file React demo for: AI Financial Tool
+// Uses: Tailwind CSS (assumed configured), recharts, framer-motion, shadcn/ui components optional
+// Features implemented in-demo: automated expense categorization (keyword+ML stub), predictive spending analysis (linear regression), goal tracking, budget alerts, dashboard
+
+import { LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell, Legend } from 'recharts';
+import { motion } from 'framer-motion';
+
+// NOTE: This file is intentionally self-contained for demonstration. In production, split into components and call a real ML service for categorization.
+
+// --- Helper: simple keyword classifier (placeholder for an AI model) ---
+const CATEGORY_KEYWORDS = {
+  Groceries: ['grocery','supermarket','sainsbury','aldi','whole foods','market','grocer','costco'],
+  Rent: ['rent','landlord','apartment','mortgage'],
+  Utilities: ['electric','gas','water','utility','internet','phone','bill'],
+  Transport: ['uber','taxi','lyft','metro','bus','train','fuel','gas station','petrol'],
+  Entertainment: ['netflix','spotify','movie','cinema','concert','theatre','netflix.com'],
+  Dining: ['restaurant','cafe','dine','starbucks','mcdonald','kfc','domino'],
+  Shopping: ['amazon','store','shop','purchase','clothes','nike','zara'],
+  Healthcare: ['pharmacy','doctor','clinic','hospital','medic','covid','vaccine'],
+  Other: []
+};
+
+function categorizeTransaction(description, amount) {
+  const d = (description || '').toLowerCase();
+  for (const [cat, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+    for (const kw of keywords) if (d.includes(kw)) return cat;
+  }
+  // simple heuristic: negative amounts -> income? we'll treat positive as expense
+  // fallback: 'Other'
+  return 'Other';
+}
+
+// --- Helper: simple linear regression to forecast next N months of spending per category ---
+function linearForecast(series, monthsAhead = 3) {
+  // series: array of {x: monthIndex (0..n-1), y: value}
+  const n = series.length;
+  if (n < 2) return Array.from({length: monthsAhead}, (_,i)=>({x: n+i, y: series[n-1]?.y || 0}));
+  let sumX=0,sumY=0,sumXY=0,sumXX=0;
+  for (const p of series){ sumX+=p.x; sumY+=p.y; sumXY+=p.x*p.y; sumXX+=p.x*p.x; }
+  const slope = (n*sumXY - sumX*sumY) / (n*sumXX - sumX*sumX);
+  const intercept = (sumY - slope*sumX)/n;
+  const out=[];
+  for (let i=0;i<monthsAhead;i++){ const x = n+i; out.push({x,y: intercept + slope*x}); }
+  return out;
+}
+
+// --- Demo initial data ---
+const demoTransactions = [
+  {id:1, date:'2025-05-02', description:'Tesco Supermarket', amount:45.32},
+  {id:2, date:'2025-05-03', description:'Starbucks Coffee', amount:5.60},
+  {id:3, date:'2025-05-05', description:'August Rent', amount:1200.00},
+  {id:4, date:'2025-05-08', description:'Uber Trip', amount:12.40},
+  {id:5, date:'2025-05-10', description:'Spotify Subscription', amount:9.99},
+  {id:6, date:'2025-06-01', description:'Costco Groceries', amount:98.20},
+  {id:7, date:'2025-06-15', description:'Electricity Bill', amount:60.00},
+  {id:8, date:'2025-06-20', description:'Amazon Purchase - Shoes', amount:79.99},
+  {id:9, date:'2025-07-02', description:'Whole Foods', amount:54.12},
+  {id:10,date:'2025-07-04', description:'Cinema - Avengers', amount:15.00},
+  {id:11,date:'2025-08-02', description:'September Rent', amount:1200.00},
+  {id:12,date:'2025-08-05', description:'BP Fuel', amount:40.00},
+];
+
+// --- Main App ---
+export default function App(){
+  const [transactions, setTransactions] = useState(()=>{
+    // load from localStorage or seed
+    try{ const s = localStorage.getItem('ai_fin_tx'); if (s) return JSON.parse(s); } catch(e){}
+    // auto-categorize seed
+    return demoTransactions.map(t=>({...t, category: categorizeTransaction(t.description, t.amount)}));
+  });
+
+  const [budget, setBudget] = useState({monthly:2500, categories:{Groceries:300, Rent:1200, Dining:200, Transport:150}});
+  const [goals, setGoals] = useState([{id:1, title:'Emergency Fund', target:3000, progress:800, due:'2026-01-01'}]);
+  const [alerts, setAlerts] = useState([]);
+
+  useEffect(()=>{ localStorage.setItem('ai_fin_tx', JSON.stringify(transactions)); },[transactions]);
+
+  // derived: category totals by month
+  const categoryTotalsByMonth = useMemo(()=>{
+    // aggregate by YYYY-MM
+    const map = {};
+    for (const t of transactions){
+      const ym = t.date.slice(0,7);
+      map[ym] = map[ym] || {};
+      map[ym][t.category] = (map[ym][t.category] || 0) + t.amount;
+    }
+    // convert to series sorted
+    const months = Object.keys(map).sort();
+    const series = months.map((m, idx)=>({month:m, ...map[m]}));
+    return {map, months, series};
+  },[transactions]);
+
+  // predictive: for each major category, build time series and forecast next 3 months
+  const forecasts = useMemo(()=>{
+    const cats = Object.keys(CATEGORY_KEYWORDS);
+    const months = categoryTotalsByMonth.months;
+    const forecasts = {};
+    cats.forEach(cat=>{
+      const series = months.map((m,idx)=>({x:idx, y: categoryTotalsByMonth.map[m]?.[cat] || 0 }));
+      const f = linearForecast(series, 3);
+      forecasts[cat]=f;
+    });
+    return forecasts;
+  },[categoryTotalsByMonth]);
+
+  // budget alerts: check total spending in current month and per category
+  useEffect(()=>{
+    const curMonth = new Date().toISOString().slice(0,7);
+    const totals = categoryTotalsByMonth.map[curMonth] || {};
+    const newAlerts=[];
+    const totalMonthSpending = Object.values(totals).reduce((a,b)=>a+(b||0),0);
+    if (totalMonthSpending > budget.monthly) newAlerts.push({type:'warning', message:`You have exceeded your monthly budget (${totalMonthSpending.toFixed(2)} > ${budget.monthly})`});
+    for (const [cat, cap] of Object.entries(budget.categories)){
+      if ((totals[cat]||0) > cap) newAlerts.push({type:'info', message:`You are over your ${cat} budget (${(totals[cat]||0).toFixed(2)} > ${cap})`});
+    }
+    setAlerts(newAlerts);
+  },[transactions, budget, categoryTotalsByMonth]);
+
+  function addTransaction(tx){
+    // auto-categorize via local classifier - in production, call an AI inference endpoint here
+    const category = categorizeTransaction(tx.description, tx.amount);
+    const nextId = (transactions.reduce((a,c)=>Math.max(a,c.id),0)||0)+1;
+    setTransactions(prev=>[{id:nextId, ...tx, category}, ...prev]);
+  }
+
+  function addGoal(goal){ setGoals(g=>[...g, {...goal, id: Date.now()}]); }
+
+  function manualCategorize(id, category){ setTransactions(prev=>prev.map(t=>t.id===id?{...t,category}:t)); }
+
+  // simple monthly spending chart data
+  const spendChartData = useMemo(()=>{
+    const months = categoryTotalsByMonth.months;
+    return months.map(m=>({month:m, total: Object.values(categoryTotalsByMonth.map[m]||{}).reduce((a,b)=>a+(b||0),0)}));
+  },[categoryTotalsByMonth]);
+
+  // pie chart: latest month category breakdown
+  const latestMonth = categoryTotalsByMonth.months.slice(-1)[0];
+  const pieData = latestMonth ? Object.entries(categoryTotalsByMonth.map[latestMonth]||{}).map(([k,v])=>({name:k, value: v})) : [];
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-6 font-sans">
+      <header className="max-w-6xl mx-auto mb-6">
+        <h1 className="text-3xl font-bold">AI Finance — Predictive Budgeting Dashboard</h1>
+        <p className="text-sm text-slate-600">Automated categorization • predictive spending • goals & alerts</p>
+      </header>
+
+      <main className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Left column: Quick add + Goals + Alerts */}
+        <section className="col-span-1 space-y-4">
+          <AddTransaction onAdd={addTransaction} />
+          <div className="bg-white rounded-2xl p-4 shadow-sm">
+            <h3 className="font-semibold">Goals</h3>
+            <GoalList goals={goals} onAdd={addGoal} />
+          </div>
+
+          <div className="bg-white rounded-2xl p-4 shadow-sm">
+            <h3 className="font-semibold">Alerts</h3>
+            {alerts.length===0 ? <p className="text-sm text-slate-500">No alerts</p> : (
+              <ul className="space-y-2">
+                {alerts.map((a,i)=>(<li key={i} className="text-sm text-rose-600">{a.message}</li>))}
+              </ul>
+            )}
+          </div>
+
+          <div className="bg-white rounded-2xl p-4 shadow-sm">
+            <h3 className="font-semibold">Budget Settings</h3>
+            <BudgetEditor budget={budget} onChange={setBudget} />
+          </div>
+        </section>
+
+        {/* Middle: Charts */}
+        <section className="col-span-2 lg:col-span-2 bg-white rounded-2xl p-4 shadow-sm">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold">Spending Overview</h2>
+            <div className="text-sm text-slate-500">Latest month: {latestMonth || '—'}</div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={spendChartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="month"/>
+                  <YAxis />
+                  <Tooltip />
+                  <Line type="monotone" dataKey="total" stroke="#8884d8" strokeWidth={2} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+
+            <div className="h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={pieData} dataKey="value" nameKey="name" outerRadius={80} fill="#82ca9d">
+                    {pieData.map((entry, index) => (<Cell key={`cell-${index}`} />))}
+                  </Pie>
+                  <Legend />
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          <div className="mt-6">
+            <h3 className="font-semibold mb-2">Category Forecast (3 months)</h3>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {Object.entries(forecasts).slice(0,6).map(([cat,f],i)=>(
+                <div key={cat} className="p-3 border rounded-lg">
+                  <div className="text-sm font-medium">{cat}</div>
+                  <div className="text-xs text-slate-500">Next 3 months predicted</div>
+                  <ul className="mt-2 text-sm">
+                    {f.map((p,idx)=>(<li key={idx}>{`Month +${idx+1}: ${p.y.toFixed(2)}`}</li>))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* Full-width: Transactions table */}
+        <section className="col-span-1 lg:col-span-3">
+          <div className="bg-white rounded-2xl p-4 shadow-sm">
+            <h3 className="font-semibold mb-4">Recent Transactions</h3>
+            <TransactionsTable data={transactions} onReclassify={manualCategorize} />
+          </div>
+        </section>
+      </main>
+    </div>
+  );
+}
+
+// --- Subcomponents ---
+function AddTransaction({onAdd}){
+  const [description, setDescription] = useState('');
+  const [amount, setAmount] = useState('');
+  const [date, setDate] = useState(new Date().toISOString().slice(0,10));
+  function submit(e){
+    e.preventDefault();
+    const a = parseFloat(amount);
+    if (!description || isNaN(a)) return alert('Please add valid description and amount');
+    onAdd({description, amount:a, date});
+    setDescription(''); setAmount('');
+  }
+  return (
+    <motion.form onSubmit={submit} className="bg-white p-4 rounded-2xl shadow-sm">
+      <h3 className="font-semibold mb-2">Add Transaction</h3>
+      <div className="grid grid-cols-1 gap-2">
+        <input value={description} onChange={e=>setDescription(e.target.value)} placeholder="Description" className="input" />
+        <div className="flex gap-2">
+          <input value={amount} onChange={e=>setAmount(e.target.value)} placeholder="Amount" className="input flex-1" />
+          <input type="date" value={date} onChange={e=>setDate(e.target.value)} className="input" />
+        </div>
+        <button className="btn btn-primary mt-2">Add</button>
+      </div>
+    </motion.form>
+  );
+}
+
+function GoalList({goals, onAdd}){
+  const [title,setTitle]=useState(''); const [target,setTarget]=useState('');
+  function submit(e){ e.preventDefault(); if(!title||!target) return; onAdd({title, target:parseFloat(target), progress:0, due: null}); setTitle(''); setTarget(''); }
+  return (
+    <div>
+      <ul className="space-y-2 mb-3">
+        {goals.map(g=>(<li key={g.id} className="p-2 border rounded-md"><div className="text-sm font-medium">{g.title}</div><div className="text-xs text-slate-500">{g.progress}/{g.target}</div></li>))}
+      </ul>
+      <form onSubmit={submit} className="flex gap-2">
+        <input value={title} onChange={e=>setTitle(e.target.value)} placeholder="Goal title" className="input" />
+        <input value={target} onChange={e=>setTarget(e.target.value)} placeholder="Target" className="input w-24" />
+        <button className="btn">Add</button>
+      </form>
+    </div>
+  );
+}
+
+function BudgetEditor({budget, onChange}){
+  const [local, setLocal] = useState(budget);
+  useEffect(()=>setLocal(budget),[budget]);
+  function save(){ onChange(local); }
+  return (
+    <div>
+      <div className="text-sm mb-2">Monthly: <input className="input w-32 inline-block ml-2" value={local.monthly} onChange={e=>setLocal({...local, monthly: parseFloat(e.target.value) || 0})} /></div>
+      <div className="text-xs mb-2">Category caps:</div>
+      <div className="grid grid-cols-2 gap-2">
+        {Object.entries(local.categories).map(([k,v])=> (
+          <div key={k} className="flex items-center gap-2">
+            <div className="text-sm w-28">{k}</div>
+            <input className="input w-24" value={v} onChange={e=>setLocal({...local, categories:{...local.categories, [k]: parseFloat(e.target.value) || 0}})} />
+          </div>
+        ))}
+      </div>
+      <button onClick={save} className="btn btn-primary mt-3">Save</button>
+    </div>
+  );
+}
+
+function TransactionsTable({data, onReclassify}){
+  return (
+    <div className="overflow-x-auto">
+      <table className="min-w-full text-sm">
+        <thead className="text-left text-xs text-slate-500">
+          <tr><th>Date</th><th>Description</th><th>Category</th><th>Amount</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+          {data.map(row=> (
+            <tr key={row.id} className="border-t">
+              <td className="py-2">{row.date}</td>
+              <td>{row.description}</td>
+              <td>{row.category}</td>
+              <td>{row.amount.toFixed(2)}</td>
+              <td>
+                <CategoryDropdown current={row.category} onSelect={(c)=>onReclassify(row.id,c)} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CategoryDropdown({current, onSelect}){
+  return (
+    <select defaultValue={current} onChange={e=>onSelect(e.target.value)} className="input w-44">
+      {Object.keys(CATEGORY_KEYWORDS).map(c=>(<option key={c} value={c}>{c}</option>))}
+    </select>
+  );
+}
+
+// --- Simple UI primitives (replace with your design system) ---
+const inputClass = 'border px-3 py-2 rounded-md w-full';
+const btnClass = 'px-3 py-2 rounded-md bg-indigo-600 text-white';
+
+const css = `
+.input{${inputClass}}
+.btn{${btnClass}}
+.btn-primary{background-color:#06b6d4}
+`;
+
+// Inject minimal styles (only for this single-file demo)
+(function injectStyles(){
+  if (document) {
+    const id = 'ai-fin-demo-styles';
+    if (!document.getElementById(id)){
+      const s = document.createElement('style');
+      s.id = id; s.innerHTML = css; document.head.appendChild(s);
+    }
+  }
+})();
